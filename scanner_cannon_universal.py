@@ -22,13 +22,15 @@ def is_motorola_mac(mac):
 def ping_ip(ip):
     try:
         param = "-n" if platform.system().lower() == "windows" else "-c"
-        result = subprocess.run(["ping", param, "1", ip],
-                                stdout=subprocess.PIPE,
-                                stderr=subprocess.DEVNULL,
-                                text=True,
-                                timeout=1)
+        result = subprocess.run(
+            ["ping", param, "1", ip],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=1
+        )
         return "TTL=" in result.stdout or "ttl=" in result.stdout
-    except:
+    except Exception:
         return False
 
 # --- Verifica se porta está aberta ---
@@ -36,43 +38,46 @@ def port_open(ip, port):
     try:
         with socket.create_connection((ip, port), timeout=0.5):
             return True
-    except:
+    except Exception:
         return False
 
 # --- Faz consulta SNMP ---
 def snmp_check(ip):
     try:
-        iterator = getCmd(
-            SnmpEngine(),
-            CommunityData('public', mpModel=0),
-            UdpTransportTarget((ip, 161), timeout=1, retries=0),
-            ContextData(),
-            ObjectType(ObjectIdentity('1.3.6.1.2.1.1.1.0'))  # sysDescr
+        errorIndication, errorStatus, errorIndex, varBinds = next(
+            getCmd(
+                SnmpEngine(),
+                CommunityData('public', mpModel=0),  # SNMPv1
+                UdpTransportTarget((ip, 161), timeout=1, retries=0),
+                ContextData(),
+                ObjectType(ObjectIdentity('1.3.6.1.2.1.1.1.0'))  # sysDescr
+            )
         )
-        errorIndication, errorStatus, errorIndex, varBinds = next(iterator)
-        if not errorIndication and not errorStatus:
-            for varBind in varBinds:
-                return str(varBind[1])
-    except:
-        pass
-    return None
+        if errorIndication or errorStatus:
+            return None
+        for varBind in varBinds:
+            return str(varBind[1])
+    except Exception:
+        return None
 
 # --- Tenta capturar o MAC pela tabela ARP ---
 def get_mac(ip):
     try:
-        arp_table = subprocess.check_output("arp -a", shell=True).decode()
+        arp_table = subprocess.check_output("arp -a", shell=True, text=True)
         for line in arp_table.splitlines():
             if ip in line:
                 parts = line.split()
                 for part in parts:
                     if "-" in part or ":" in part:
                         return part.lower()
-    except:
+    except Exception:
         return None
 
 # --- Verifica as infos de um host ---
 def scan_host(ip):
     result = {"ip": ip, "ping": False, "ports": [], "mac": None, "snmp": None, "is_motorola": False}
+    
+    # Ping
     if ping_ip(ip):
         result["ping"] = True
 
@@ -122,14 +127,17 @@ def full_scan():
         print(f"\n🔍 Escaneando faixa: {r}.1 a {r}.254...")
         ips = [f"{r}.{i}" for i in range(1, 255)]
 
-        with ThreadPoolExecutor(max_workers=100) as executor:
+        with ThreadPoolExecutor(max_workers=50) as executor:  # Reduced workers for stability
             futures = {executor.submit(scan_host, ip): ip for ip in ips}
             for future in as_completed(futures):
-                res = future.result()
-                if res:
-                    found.append(res)
-                    motorola_tag = "🟢 MOTOROLA" if res["is_motorola"] else ""
-                    print(f"[+] IP: {res['ip']} | Ping: {res['ping']} | Portas: {res['ports']} | MAC: {res['mac']} | SNMP: {res['snmp']} {motorola_tag}")
+                try:
+                    res = future.result()
+                    if res:
+                        found.append(res)
+                        motorola_tag = "🟢 MOTOROLA" if res["is_motorola"] else ""
+                        print(f"[+] IP: {res['ip']} | Ping: {res['ping']} | Portas: {res['ports']} | MAC: {res['mac']} | SNMP: {res['snmp']} {motorola_tag}")
+                except Exception as e:
+                    print(f"Erro ao escanear {futures[future]}: {e}")
 
     if not found:
         print("\n❌ Nada encontrado.")
