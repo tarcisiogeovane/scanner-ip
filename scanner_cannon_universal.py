@@ -6,7 +6,19 @@ import ipaddress
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pysnmp.hlapi import getCmd, SnmpEngine, CommunityData, UdpTransportTarget, ContextData, ObjectType, ObjectIdentity
 
-# --- Função: Testa ping em um IP ---
+# --- Prefixos MAC conhecidos da Motorola Canopy ---
+motorola_prefixes = ["00:04:56", "00:0F:66", "00:12:BF", "00:15:6D", "00:1B:2F", "00:1D:7E", "00:20:40"]
+
+# --- Verifica se o MAC começa com prefixo Motorola ---
+def is_motorola_mac(mac):
+    if not mac:
+        return False
+    for prefix in motorola_prefixes:
+        if mac.lower().startswith(prefix.lower()):
+            return True
+    return False
+
+# --- Pinga o IP pra ver se está ativo ---
 def ping_ip(ip):
     try:
         param = "-n" if platform.system().lower() == "windows" else "-c"
@@ -19,7 +31,7 @@ def ping_ip(ip):
     except:
         return False
 
-# --- Função: Testa se uma porta está aberta ---
+# --- Verifica se porta está aberta ---
 def port_open(ip, port):
     try:
         with socket.create_connection((ip, port), timeout=0.5):
@@ -27,7 +39,7 @@ def port_open(ip, port):
     except:
         return False
 
-# --- Função: Faz consulta SNMP com comunidade "public" ---
+# --- Faz consulta SNMP ---
 def snmp_check(ip):
     try:
         iterator = getCmd(
@@ -45,7 +57,7 @@ def snmp_check(ip):
         pass
     return None
 
-# --- Função: Busca MAC associado ao IP via tabela ARP ---
+# --- Tenta capturar o MAC pela tabela ARP ---
 def get_mac(ip):
     try:
         arp_table = subprocess.check_output("arp -a", shell=True).decode()
@@ -58,34 +70,34 @@ def get_mac(ip):
     except:
         return None
 
-# --- Função: Verifica se um IP está ativo via ping, portas ou SNMP ---
+# --- Verifica as infos de um host ---
 def scan_host(ip):
-    result = {"ip": ip, "ping": False, "ports": [], "mac": None, "snmp": None}
+    result = {"ip": ip, "ping": False, "ports": [], "mac": None, "snmp": None, "is_motorola": False}
     if ping_ip(ip):
         result["ping"] = True
 
-    # Testar portas padrão de equipamentos de rede
+    # Portas comuns
     for port in [80, 443, 22, 23, 161, 8080, 554]:
         if port_open(ip, port):
             result["ports"].append(port)
 
-    # Testar SNMP (caso a porta 161 esteja aberta ou por tentativa mesmo assim)
-    if 161 in result["ports"] or True:
-        snmp_info = snmp_check(ip)
-        if snmp_info:
-            result["snmp"] = snmp_info
+    # SNMP
+    snmp_info = snmp_check(ip)
+    if snmp_info:
+        result["snmp"] = snmp_info
 
-    # Verificar MAC address na tabela ARP
+    # MAC
     mac = get_mac(ip)
     if mac:
         result["mac"] = mac
+        if is_motorola_mac(mac):
+            result["is_motorola"] = True
 
-    # Retorna se alguma info foi coletada
     if result["ping"] or result["ports"] or result["mac"] or result["snmp"]:
         return result
     return None
 
-# --- Função: Detecta possíveis faixas de IP ---
+# --- Gera faixas possíveis para escanear ---
 def get_possible_ranges():
     ranges = [
         "192.168.0", "192.168.1", "192.168.88",
@@ -101,13 +113,13 @@ def get_possible_ranges():
                     ranges.insert(0, ip_base)
     return ranges
 
-# --- Função: Scanner principal com multithreading ---
+# --- Scanner principal usando threads ---
 def full_scan():
     ranges = get_possible_ranges()
     found = []
 
     for r in ranges:
-        print(f"\n🔎 Escaneando faixa: {r}.1 a {r}.254...")
+        print(f"\n🔍 Escaneando faixa: {r}.1 a {r}.254...")
         ips = [f"{r}.{i}" for i in range(1, 255)]
 
         with ThreadPoolExecutor(max_workers=100) as executor:
@@ -116,15 +128,17 @@ def full_scan():
                 res = future.result()
                 if res:
                     found.append(res)
-                    print(f"[+] IP: {res['ip']} | Ping: {res['ping']} | Portas: {res['ports']} | MAC: {res['mac']} | SNMP: {res['snmp']}")
+                    motorola_tag = "🟢 MOTOROLA" if res["is_motorola"] else ""
+                    print(f"[+] IP: {res['ip']} | Ping: {res['ping']} | Portas: {res['ports']} | MAC: {res['mac']} | SNMP: {res['snmp']} {motorola_tag}")
 
     if not found:
         print("\n❌ Nada encontrado.")
     else:
         print("\n✅ Dispositivos encontrados:")
         for res in found:
-            print(f"IP: {res['ip']} | Ping: {res['ping']} | Portas: {res['ports']} | MAC: {res['mac']} | SNMP: {res['snmp']}")
+            motorola_tag = "🟢 MOTOROLA" if res["is_motorola"] else ""
+            print(f"IP: {res['ip']} | Ping: {res['ping']} | Portas: {res['ports']} | MAC: {res['mac']} | SNMP: {res['snmp']} {motorola_tag}")
 
-# --- Execução principal ---
+# --- Início ---
 if __name__ == "__main__":
     full_scan()
