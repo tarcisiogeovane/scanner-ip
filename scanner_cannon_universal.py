@@ -5,6 +5,10 @@ import psutil
 import ipaddress
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pysnmp.hlapi import getCmd, SnmpEngine, CommunityData, UdpTransportTarget, ContextData, ObjectType, ObjectIdentity
+import tkinter as tk
+from tkinter import ttk, scrolledtext
+import threading
+import queue
 
 # --- Prefixos MAC conhecidos da Motorola Canopy ---
 motorola_prefixes = ["00:04:56", "00:0F:66", "00:12:BF", "00:15:6D", "00:1B:2F", "00:1D:7E", "00:20:40"]
@@ -42,12 +46,12 @@ def port_open(ip, port):
         return False
 
 # --- Faz consulta SNMP ---
-def snmp_check(ip):
+def snmp_check(ip, community):
     try:
         errorIndication, errorStatus, errorIndex, varBinds = next(
             getCmd(
                 SnmpEngine(),
-                CommunityData('public', mpModel=0),  # SNMPv1
+                CommunityData(community, mpModel=0),  # SNMPv1
                 UdpTransportTarget((ip, 161), timeout=1, retries=0),
                 ContextData(),
                 ObjectType(ObjectIdentity('1.3.6.1.2.1.1.1.0'))  # sysDescr
@@ -74,33 +78,35 @@ def get_mac(ip):
         return None
 
 # --- Verifica as infos de um host ---
-def scan_host(ip):
+def scan_host(ip, do_ping, do_ports, do_snmp, do_mac, community, result_queue):
     result = {"ip": ip, "ping": False, "ports": [], "mac": None, "snmp": None, "is_motorola": False}
     
     # Ping
-    if ping_ip(ip):
+    if do_ping and ping_ip(ip):
         result["ping"] = True
 
     # Portas comuns
-    for port in [80, 443, 22, 23, 161, 8080, 554]:
-        if port_open(ip, port):
-            result["ports"].append(port)
+    if do_ports:
+        for port in [80, 443, 22, 23, 161, 8080, 554]:
+            if port_open(ip, port):
+                result["ports"].append(port)
 
     # SNMP
-    snmp_info = snmp_check(ip)
-    if snmp_info:
-        result["snmp"] = snmp_info
+    if do_snmp:
+        snmp_info = snmp_check(ip, community)
+        if snmp_info:
+            result["snmp"] = snmp_info
 
     # MAC
-    mac = get_mac(ip)
-    if mac:
-        result["mac"] = mac
-        if is_motorola_mac(mac):
-            result["is_motorola"] = True
+    if do_mac:
+        mac = get_mac(ip)
+        if mac:
+            result["mac"] = mac
+            if is_motorola_mac(mac):
+                result["is_motorola"] = True
 
     if result["ping"] or result["ports"] or result["mac"] or result["snmp"]:
-        return result
-    return None
+        result_queue.put(result)
 
 # --- Gera faixas possíveis para escanear ---
 def get_possible_ranges():
@@ -118,35 +124,152 @@ def get_possible_ranges():
                     ranges.insert(0, ip_base)
     return ranges
 
-# --- Scanner principal usando threads ---
-def full_scan():
-    ranges = get_possible_ranges()
-    found = []
+# --- GUI ---
+class ScannerApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Scanner de Rede Universal")
+        self.root.geometry("800x600")
+        self.scan_thread = None
+        self.stop_scan = False
+        self.result_queue = queue.Queue()
 
-    for r in ranges:
-        print(f"\n🔍 Escaneando faixa: {r}.1 a {r}.254...")
-        ips = [f"{r}.{i}" for i in range(1, 255)]
+        # Frame principal
+        self.main_frame = ttk.Frame(self.root, padding="10")
+        self.main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+
+        # Seleção de faixa de IP
+        ttk.Label(self.main_frame, text="Faixa de IP (ex: 192.168.1.1-254):").grid(row=0, column=0, sticky=tk.W)
+        self.ip_range = ttk.Combobox(self.main_frame, values=[f"{r}.1-254" for r in get_possible_ranges()], width=30)
+        self.ip_range.grid(row=0, column=1, sticky=tk.W)
+        self.ip_range.set(f"{get_possible_ranges()[0]}.1-254")
+
+        # Community string SNMP
+        ttk.Label(self.main_frame, text="Community String SNMP:").grid(row=1, column=0, sticky=tk.W)
+        self.community = ttk.Entry(self.main_frame, width=20)
+        self.community.grid(row=1, column=1, sticky=tk.W)
+        self.community.insert(0, "public")
+
+        # Opções de escaneamento
+        self.ping_var = tk.BooleanVar(value=True)
+        self.ports_var = tk.BooleanVar(value=True)
+        self.snmp_var = tk.BooleanVar(value=True)
+        self.mac_var = tk.BooleanVar(value=True)
+
+        ttk.Checkbutton(self.main_frame, text="Ping", variable=self.ping_var).grid(row=2, column=0, sticky=tk.W)
+        ttk.Checkbutton(self.main_frame, text="Portas", variable=self.ports_var).grid(row=2, column=1, sticky=tk.W)
+        ttk.Checkbutton(self.main_frame, text="SNMP", variable=self.snmp_var).grid(row=3, column=0, sticky=tk.W)
+        ttk.Checkbutton(self.main_frame, text="MAC", variable=self.mac_var).grid(row=3, column=1, sticky=tk.W)
+
+        # Botões
+        self.scan_button = ttk.Button(self.main_frame, text="Iniciar Escaneamento", command=self.start_scan)
+        self.scan_button.grid(row=4, column=0, columnspan=2, pady=10)
+
+        self.stop_button = ttk.Button(self.main_frame, text="Parar Escaneamento", command=self.stop_scan_func, state=tk.DISABLED)
+        self.stop_button.grid(row=5, column=0, columnspan=2, pady=5)
+
+        # Área de resultados
+        self.result_text = scrolledtext.ScrolledText(self.main_frame, width=90, height=20)
+        self.result_text.grid(row=6, column=0, columnspan=2, pady=10)
+
+        # Barra de status
+        self.status_var = tk.StringVar(value="Pronto")
+        ttk.Label(self.main_frame, textvariable=self.status_var).grid(row=7, column=0, columnspan=2, sticky=tk.W)
+
+        # Configurar redimensionamento
+        self.root.columnconfigure(0, weight=1)
+        self.root.rowconfigure(0, weight=1)
+        self.main_frame.columnconfigure(0, weight=1)
+        self.main_frame.columnconfigure(1, weight=1)
+
+        # Atualizar resultados periodicamente
+        self.update_results()
+
+    def parse_ip_range(self, ip_range):
+        try:
+            start_ip, end_range = ip_range.split("-")
+            base = ".".join(start_ip.split(".")[:3])
+            start = int(start_ip.split(".")[-1])
+            end = int(end_range)
+            return [f"{base}.{i}" for i in range(start, end + 1)]
+        except Exception:
+            return []
+
+    def start_scan(self):
+        self.result_text.delete(1.0, tk.END)
+        self.scan_button.config(state=tk.DISABLED)
+        self.stop_button.config(state=tk.NORMAL)
+        self.stop_scan = False
+        self.result_queue = queue.Queue()
+
+        ip_range = self.ip_range.get()
+        community = self.community.get()
+        do_ping = self.ping_var.get()
+        do_ports = self.ports_var.get()
+        do_snmp = self.snmp_var.get()
+        do_mac = self.mac_var.get()
+
+        ips = self.parse_ip_range(ip_range)
+        if not ips:
+            self.result_text.insert(tk.END, "Erro: Faixa de IP inválida.\n")
+            self.scan_button.config(state=tk.NORMAL)
+            self.stop_button.config(state=tk.DISABLED)
+            return
+
+        self.scan_thread = threading.Thread(
+            target=self.scan_network,
+            args=(ips, do_ping, do_ports, do_snmp, do_mac, community)
+        )
+        self.scan_thread.start()
+
+    def scan_network(self, ips, do_ping, do_ports, do_snmp, do_mac, community):
+        self.status_var.set(f"Escaneando {len(ips)} IPs...")
+        found = []
 
         with ThreadPoolExecutor(max_workers=50) as executor:
-            futures = {executor.submit(scan_host, ip): ip for ip in ips}
+            futures = {executor.submit(scan_host, ip, do_ping, do_ports, do_snmp, do_mac, community, self.result_queue): ip for ip in ips}
             for future in as_completed(futures):
+                if self.stop_scan:
+                    break
                 try:
-                    res = future.result()
-                    if res:
-                        found.append(res)
-                        motorola_tag = "🟢 MOTOROLA" if res["is_motorola"] else ""
-                        print(f"[+] IP: {res['ip']} | Ping: {res['ping']} | Portas: {res['ports']} | MAC: {res['mac']} | SNMP: {res['snmp']} {motorola_tag}")
+                    ip = futures[future]
+                    self.status_var.set(f"Escaneando {ip}...")
+                    future.result()  # Processa a conclusão
                 except Exception as e:
-                    print(f"Erro ao escanear {futures[future]}: {e}")
+                    self.result_queue.put(f"Erro ao escanear {ip}: {e}")
 
-    if not found:
-        print("\n❌ Nada encontrado.")
-    else:
-        print("\n✅ Dispositivos encontrados:")
-        for res in found:
-            motorola_tag = "🟢 MOTOROLA" if res["is_motorola"] else ""
-            print(f"IP: {res['ip']} | Ping: {res['ping']} | Portas: {res['ports']} | MAC: {res['mac']} | SNMP: {res['snmp']} {motorola_tag}")
+        self.result_queue.put("FIM")
+        self.status_var.set("Escaneamento concluído.")
 
-# --- Início ---
+    def update_results(self):
+        try:
+            while True:
+                item = self.result_queue.get_nowait()
+                if item == "FIM":
+                    self.scan_button.config(state=tk.NORMAL)
+                    self.stop_button.config(state=tk.DISABLED)
+                    break
+                if isinstance(item, dict):
+                    motorola_tag = "🟢 MOTOROLA" if item["is_motorola"] else ""
+                    self.result_text.insert(
+                        tk.END,
+                        f"[+] IP: {item['ip']} | Ping: {item['ping']} | Portas: {item['ports']} | "
+                        f"MAC: {item['mac']} | SNMP: {item['snmp']} {motorola_tag}\n"
+                    )
+                else:
+                    self.result_text.insert(tk.END, f"{item}\n")
+                self.result_text.see(tk.END)
+        except queue.Empty:
+            pass
+        self.root.after(100, self.update_results)
+
+    def stop_scan_func(self):
+        self.stop_scan = True
+        self.status_var.set("Parando escaneamento...")
+        self.scan_button.config(state=tk.NORMAL)
+        self.stop_button.config(state=tk.DISABLED)
+
 if __name__ == "__main__":
-    full_scan()
+    root = tk.Tk()
+    app = ScannerApp(root)
+    root.mainloop()
