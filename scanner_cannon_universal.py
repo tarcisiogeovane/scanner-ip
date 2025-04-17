@@ -127,7 +127,7 @@ def full_scan():
         print(f"\n🔍 Escaneando faixa: {r}.1 a {r}.254...")
         ips = [f"{r}.{i}" for i in range(1, 255)]
 
-        with ThreadPoolExecutor(max_workers=50) as executor:  # Reduced workers for stability
+        with ThreadPoolExecutor(max_workers=50) as executor:
             futures = {executor.submit(scan_host, ip): ip for ip in ips}
             for future in as_completed(futures):
                 try:
