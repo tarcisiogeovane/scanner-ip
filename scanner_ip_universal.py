@@ -39,17 +39,18 @@ def main():
         "192.168.100",
         "192.168.254",
         "10.0.0",
+        "169.254.1",  # faixa de fallback zerada
+        "169.254.0",  # faixa de fallback comum
+        "169.254.2",
     ]
 
     meu_ip = get_ipv4_ethernet()
     print(f"🖥️ IP detectado na Ethernet: {meu_ip}")
 
-    if meu_ip is None or meu_ip.startswith("169.254"):
-        print("⚠️ IP automático não recebido (provavelmente Canopy está com IP fixo). Vamos testar faixas comuns...\n")
-    else:
-        print("✅ IP recebido via DHCP. Vamos testar primeiro essa faixa.")
-        faixa = ".".join(meu_ip.split(".")[:3])
-        faixa_comum.insert(0, faixa)
+    if meu_ip:
+        faixa_dinamica = ".".join(meu_ip.split(".")[:3])
+        if faixa_dinamica not in faixa_comum:
+            faixa_comum.insert(0, faixa_dinamica)
 
     total_achados = []
     for faixa in faixa_comum:
