@@ -162,8 +162,11 @@ class ScannerApp:
         ttk.Checkbutton(self.main_frame, text="MAC", variable=self.mac_var).grid(row=3, column=1, sticky=tk.W)
 
         # Botões
-        self.scan_button = ttk.Button(self.main_frame, text="Iniciar Escaneamento", command=self.start_scan)
-        self.scan_button.grid(row=4, column=0, columnspan=2, pady=10)
+        self.scan_button = ttk.Button(self.main_frame, text="Escanear Faixa Selecionada", command=self.start_scan)
+        self.scan_button.grid(row=4, column=0, pady=10)
+
+        self.scan_all_button = ttk.Button(self.main_frame, text="Escanear Todas as Redes", command=self.start_scan_all)
+        self.scan_all_button.grid(row=4, column=1, pady=10)
 
         self.stop_button = ttk.Button(self.main_frame, text="Parar Escaneamento", command=self.stop_scan_func, state=tk.DISABLED)
         self.stop_button.grid(row=5, column=0, columnspan=2, pady=5)
@@ -198,6 +201,7 @@ class ScannerApp:
     def start_scan(self):
         self.result_text.delete(1.0, tk.END)
         self.scan_button.config(state=tk.DISABLED)
+        self.scan_all_button.config(state=tk.DISABLED)
         self.stop_button.config(state=tk.NORMAL)
         self.stop_scan = False
         self.result_queue = queue.Queue()
@@ -213,30 +217,61 @@ class ScannerApp:
         if not ips:
             self.result_text.insert(tk.END, "Erro: Faixa de IP inválida.\n")
             self.scan_button.config(state=tk.NORMAL)
+            self.scan_all_button.config(state=tk.NORMAL)
             self.stop_button.config(state=tk.DISABLED)
             return
 
         self.scan_thread = threading.Thread(
             target=self.scan_network,
-            args=(ips, do_ping, do_ports, do_snmp, do_mac, community)
+            args=([ips], do_ping, do_ports, do_snmp, do_mac, community)
         )
         self.scan_thread.start()
 
-    def scan_network(self, ips, do_ping, do_ports, do_snmp, do_mac, community):
-        self.status_var.set(f"Escaneando {len(ips)} IPs...")
-        found = []
+    def start_scan_all(self):
+        self.result_text.delete(1.0, tk.END)
+        self.scan_button.config(state=tk.DISABLED)
+        self.scan_all_button.config(state=tk.DISABLED)
+        self.stop_button.config(state=tk.NORMAL)
+        self.stop_scan = False
+        self.result_queue = queue.Queue()
 
-        with ThreadPoolExecutor(max_workers=50) as executor:
-            futures = {executor.submit(scan_host, ip, do_ping, do_ports, do_snmp, do_mac, community, self.result_queue): ip for ip in ips}
-            for future in as_completed(futures):
-                if self.stop_scan:
-                    break
-                try:
-                    ip = futures[future]
-                    self.status_var.set(f"Escaneando {ip}...")
-                    future.result()  # Processa a conclusão
-                except Exception as e:
-                    self.result_queue.put(f"Erro ao escanear {ip}: {e}")
+        community = self.community.get()
+        do_ping = self.ping_var.get()
+        do_ports = self.ports_var.get()
+        do_snmp = self.snmp_var.get()
+        do_mac = self.mac_var.get()
+
+        # Gerar todas as faixas
+        ranges = get_possible_ranges()
+        all_ips = []
+        for r in ranges:
+            ips = [f"{r}.{i}" for i in range(1, 255)]
+            all_ips.append(ips)
+
+        self.scan_thread = threading.Thread(
+            target=self.scan_network,
+            args=(all_ips, do_ping, do_ports, do_snmp, do_mac, community)
+        )
+        self.scan_thread.start()
+
+    def scan_network(self, ip_ranges, do_ping, do_ports, do_snmp, do_mac, community):
+        for idx, ips in enumerate(ip_ranges):
+            if self.stop_scan:
+                break
+            range_str = f"{ips[0].split('.')[0]}.{ips[0].split('.')[1]}.{ips[0].split('.')[2]}.1-254"
+            self.status_var.set(f"Escaneando {range_str} ({idx + 1}/{len(ip_ranges)})...")
+            self.result_queue.put(f"\n🔍 Escaneando faixa: {range_str}...")
+
+            with ThreadPoolExecutor(max_workers=50) as executor:
+                futures = {executor.submit(scan_host, ip, do_ping, do_ports, do_snmp, do_mac, community, self.result_queue): ip for ip in ips}
+                for future in as_completed(futures):
+                    if self.stop_scan:
+                        break
+                    try:
+                        ip = futures[future]
+                        future.result()  # Processa a conclusão
+                    except Exception as e:
+                        self.result_queue.put(f"Erro ao escanear {ip}: {e}")
 
         self.result_queue.put("FIM")
         self.status_var.set("Escaneamento concluído.")
@@ -247,6 +282,7 @@ class ScannerApp:
                 item = self.result_queue.get_nowait()
                 if item == "FIM":
                     self.scan_button.config(state=tk.NORMAL)
+                    self.scan_all_button.config(state=tk.NORMAL)
                     self.stop_button.config(state=tk.DISABLED)
                     break
                 if isinstance(item, dict):
@@ -267,6 +303,7 @@ class ScannerApp:
         self.stop_scan = True
         self.status_var.set("Parando escaneamento...")
         self.scan_button.config(state=tk.NORMAL)
+        self.scan_all_button.config(state=tk.NORMAL)
         self.stop_button.config(state=tk.DISABLED)
 
 if __name__ == "__main__":
