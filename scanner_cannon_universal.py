@@ -114,7 +114,7 @@ def get_possible_ranges():
         "192.168.0", "192.168.1", "192.168.88",
         "192.168.100", "192.168.254", "10.0.0",
         "169.254.0", "169.254.1", "169.254.2",
-        "169.254.128"  # Common for devices like radios
+        "169.254.128"
     ]
     for iface, addrs in psutil.net_if_addrs().items():
         for addr in addrs:
@@ -124,6 +124,25 @@ def get_possible_ranges():
                 if ip_base not in ranges:
                     ranges.insert(0, ip_base)
     return ranges
+
+# --- Gera todas as faixas privadas ---
+def get_all_private_ranges():
+    private_ranges = [
+        ("10.0.0.0", "10.255.255.255"),       # 10.0.0.0/8
+        ("172.16.0.0", "172.31.255.255"),     # 172.16.0.0/12
+        ("192.168.0.0", "192.168.255.255"),   # 192.168.0.0/16
+        ("169.254.0.0", "169.254.255.255")    # 169.254.0.0/16
+    ]
+    all_subnets = []
+    for start, end in private_ranges:
+        start_ip = ipaddress.ip_address(start)
+        end_ip = ipaddress.ip_address(end)
+        current_ip = start_ip
+        while current_ip <= end_ip:
+            network = ipaddress.ip_network(f"{current_ip}/24", strict=False)
+            all_subnets.append(str(network.network_address))
+            current_ip = ipaddress.ip_address(int(network.network_address) + 256)
+    return all_subnets
 
 # --- Detecta dispositivos conectados diretamente ---
 def get_connected_devices():
@@ -137,7 +156,7 @@ def get_connected_devices():
                 ip = parts[0]
                 devices.append(ip)
         
-        # Adicionar IPs padrão de dispositivos (e.g., radios)
+        # Adicionar IPs padrão de dispositivos
         default_ips = [
             "169.254.1.1", "192.168.0.1", "192.168.1.1",
             "10.0.0.1", "169.254.128.1"
@@ -159,6 +178,7 @@ class ScannerApp:
         self.scan_thread = None
         self.stop_scan = False
         self.result_queue = queue.Queue()
+        self.status_queue = queue.Queue()
 
         # Frame principal
         self.main_frame = ttk.Frame(self.root, padding="10")
@@ -195,7 +215,10 @@ class ScannerApp:
         self.scan_all_button.grid(row=4, column=1, pady=10)
 
         self.quick_scan_button = ttk.Button(self.main_frame, text="Escaneamento Rápido (Dispositivos Conectados)", command=self.start_quick_scan)
-        self.quick_scan_button.grid(row=5, column=0, columnspan=2, pady=5)
+        self.quick_scan_button.grid(row=5, column=0, pady=5)
+
+        self.scan_private_button = ttk.Button(self.main_frame, text="Escanear Todas as Faixas Privadas", command=self.start_scan_private)
+        self.scan_private_button.grid(row=5, column=1, pady=5)
 
         self.stop_button = ttk.Button(self.main_frame, text="Parar Escaneamento", command=self.stop_scan_func, state=tk.DISABLED)
         self.stop_button.grid(row=6, column=0, columnspan=2, pady=5)
@@ -214,7 +237,7 @@ class ScannerApp:
         self.main_frame.columnconfigure(0, weight=1)
         self.main_frame.columnconfigure(1, weight=1)
 
-        # Atualizar resultados periodicamente
+        # Atualizar resultados e status periodicamente
         self.update_results()
 
     def parse_ip_range(self, ip_range):
@@ -232,9 +255,11 @@ class ScannerApp:
         self.scan_button.config(state=tk.DISABLED)
         self.scan_all_button.config(state=tk.DISABLED)
         self.quick_scan_button.config(state=tk.DISABLED)
+        self.scan_private_button.config(state=tk.DISABLED)
         self.stop_button.config(state=tk.NORMAL)
         self.stop_scan = False
         self.result_queue = queue.Queue()
+        self.status_queue = queue.Queue()
 
         ip_range = self.ip_range.get()
         community = self.community.get()
@@ -249,6 +274,7 @@ class ScannerApp:
             self.scan_button.config(state=tk.NORMAL)
             self.scan_all_button.config(state=tk.NORMAL)
             self.quick_scan_button.config(state=tk.NORMAL)
+            self.scan_private_button.config(state=tk.NORMAL)
             self.stop_button.config(state=tk.DISABLED)
             return
 
@@ -263,9 +289,11 @@ class ScannerApp:
         self.scan_button.config(state=tk.DISABLED)
         self.scan_all_button.config(state=tk.DISABLED)
         self.quick_scan_button.config(state=tk.DISABLED)
+        self.scan_private_button.config(state=tk.DISABLED)
         self.stop_button.config(state=tk.NORMAL)
         self.stop_scan = False
         self.result_queue = queue.Queue()
+        self.status_queue = queue.Queue()
 
         community = self.community.get()
         do_ping = self.ping_var.get()
@@ -290,9 +318,11 @@ class ScannerApp:
         self.scan_button.config(state=tk.DISABLED)
         self.scan_all_button.config(state=tk.DISABLED)
         self.quick_scan_button.config(state=tk.DISABLED)
+        self.scan_private_button.config(state=tk.DISABLED)
         self.stop_button.config(state=tk.NORMAL)
         self.stop_scan = False
         self.result_queue = queue.Queue()
+        self.status_queue = queue.Queue()
 
         community = self.community.get()
         do_ping = self.ping_var.get()
@@ -307,6 +337,7 @@ class ScannerApp:
             self.scan_button.config(state=tk.NORMAL)
             self.scan_all_button.config(state=tk.NORMAL)
             self.quick_scan_button.config(state=tk.NORMAL)
+            self.scan_private_button.config(state=tk.NORMAL)
             self.stop_button.config(state=tk.DISABLED)
             return
 
@@ -316,12 +347,44 @@ class ScannerApp:
         )
         self.scan_thread.start()
 
+    def start_scan_private(self):
+        self.result_text.delete(1.0, tk.END)
+        self.scan_button.config(state=tk.DISABLED)
+        self.scan_all_button.config(state=tk.DISABLED)
+        self.quick_scan_button.config(state=tk.DISABLED)
+        self.scan_private_button.config(state=tk.DISABLED)
+        self.stop_button.config(state=tk.NORMAL)
+        self.stop_scan = False
+        self.result_queue = queue.Queue()
+        self.status_queue = queue.Queue()
+
+        community = self.community.get()
+        do_ping = self.ping_var.get()
+        do_ports = self.ports_var.get()
+        do_snmp = self.snmp_var.get()
+        do_mac = self.mac_var.get()
+
+        # Gerar todas as faixas privadas
+        ranges = get_all_private_ranges()
+        all_ips = []
+        for r in ranges:
+            # Escanear apenas IPs prováveis para otimizar
+            likely_ips = [f"{r}.{i}" for i in [1, 100, 254]]  # Common device IPs
+            all_ips.append(likely_ips)
+
+        self.scan_thread = threading.Thread(
+            target=self.scan_network,
+            args=(all_ips, do_ping, do_ports, do_snmp, do_mac, community)
+        )
+        self.scan_thread.start()
+
     def scan_network(self, ip_ranges, do_ping, do_ports, do_snmp, do_mac, community):
         for idx, ips in enumerate(ip_ranges):
             if self.stop_scan:
                 break
-            self.status_var.set(f"Escaneando dispositivos ({idx + 1}/{len(ip_ranges)})...")
-            self.result_queue.put(f"\n🔍 Escaneando {len(ips)} IPs...")
+            range_str = f"{ips[0].split('.')[0]}.{ips[0].split('.')[1]}.{ips[0].split('.')[2]}.x"
+            self.status_queue.put(f"Escaneando {range_str} ({idx + 1}/{len(ip_ranges)})...")
+            self.result_queue.put(f"\n🔍 Escaneando faixa: {range_str}...")
 
             with ThreadPoolExecutor(max_workers=50) as executor:
                 futures = {executor.submit(scan_host, ip, do_ping, do_ports, do_snmp, do_mac, community, self.result_queue): ip for ip in ips}
@@ -335,16 +398,18 @@ class ScannerApp:
                         self.result_queue.put(f"Erro ao escanear {ip}: {e}")
 
         self.result_queue.put("FIM")
-        self.status_var.set("Escaneamento concluído.")
+        self.status_queue.put("Escaneamento concluído.")
 
     def update_results(self):
         try:
+            # Atualizar resultados
             while True:
                 item = self.result_queue.get_nowait()
                 if item == "FIM":
                     self.scan_button.config(state=tk.NORMAL)
                     self.scan_all_button.config(state=tk.NORMAL)
                     self.quick_scan_button.config(state=tk.NORMAL)
+                    self.scan_private_button.config(state=tk.NORMAL)
                     self.stop_button.config(state=tk.DISABLED)
                     break
                 if isinstance(item, dict):
@@ -359,6 +424,15 @@ class ScannerApp:
                 self.result_text.see(tk.END)
         except queue.Empty:
             pass
+
+        try:
+            # Atualizar status
+            while True:
+                status = self.status_queue.get_nowait()
+                self.status_var.set(status)
+        except queue.Empty:
+            pass
+
         self.root.after(100, self.update_results)
 
     def stop_scan_func(self):
@@ -367,6 +441,7 @@ class ScannerApp:
         self.scan_button.config(state=tk.NORMAL)
         self.scan_all_button.config(state=tk.NORMAL)
         self.quick_scan_button.config(state=tk.NORMAL)
+        self.scan_private_button.config(state=tk.NORMAL)
         self.stop_button.config(state=tk.DISABLED)
 
 if __name__ == "__main__":
